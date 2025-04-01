@@ -1,33 +1,44 @@
-from sqlmodel import Session, create_engine, select
+import logging
+from motor.motor_asyncio import AsyncIOMotorClient
+from tenacity import after_log, before_log, retry, stop_after_attempt, wait_fixed
+from beanie import init_beanie
 
-from app import crud
+from app.models import User, Item
 from app.core.config import settings
-from app.models import User, UserCreate
 
-engine = create_engine(str(settings.SQLALCHEMY_DATABASE_URI))
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+max_tries = 60 * 5  # 5 minutes
+wait_seconds = 1
+
+DATABASE_URL = settings.MONGODB_DATABASE_URI  # Ensure this is set in your config
 
 
-# make sure all SQLModel models are imported (app.models) before initializing DB
-# otherwise, SQLModel might fail to initialize relationships properly
-# for more details: https://github.com/fastapi/full-stack-fastapi-template/issues/28
+@retry(
+    stop=stop_after_attempt(max_tries),
+    wait=wait_fixed(wait_seconds),
+    before=before_log(logger, logging.INFO),
+    after=after_log(logger, logging.WARN),
+)
+async def init_db() -> None:
+    try:
+        client = AsyncIOMotorClient(DATABASE_URL)
+        db = client.get_database()  # Connect to the database
+        await init_beanie(database=db, document_models=[User, Item])  # Initialize Beanie
+        logger.info("Database initialized successfully")
+    except Exception as e:
+        logger.error(f"Database initialization failed: {e}")
+        raise e
 
 
-def init_db(session: Session) -> None:
-    # Tables should be created with Alembic migrations
-    # But if you don't want to use migrations, create
-    # the tables un-commenting the next lines
-    # from sqlmodel import SQLModel
+async def main() -> None:
+    logger.info("Initializing service")
+    await init_db()
+    logger.info("Service finished initializing")
 
-    # This works because the models are already imported and registered from app.models
-    # SQLModel.metadata.create_all(engine)
 
-    user = session.exec(
-        select(User).where(User.email == settings.FIRST_SUPERUSER)
-    ).first()
-    if not user:
-        user_in = UserCreate(
-            email=settings.FIRST_SUPERUSER,
-            password=settings.FIRST_SUPERUSER_PASSWORD,
-            is_superuser=True,
-        )
-        user = crud.create_user(session=session, user_create=user_in)
+if __name__ == "__main__":
+    import asyncio
+
+    asyncio.run(main())
